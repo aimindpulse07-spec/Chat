@@ -1,28 +1,33 @@
-# Telegram Gemini AI Bot
+# Fast Gemini Telegram Chat Bot
 
-Telegram AI chatbot using Google's Gemini API, MongoDB conversation memory, and optional Hindi voice replies.
+Fast, casual Gemini chat bot with optional Hindi voice replies and song search.
 
-## Environment variables
+## Variables
 
 ```env
 BOT_TOKEN=your_telegram_bot_token
 MONGO_URL=your_mongodb_connection_url
 GEMINI_API_KEY=your_google_gemini_api_key
-GEMINI_MODEL=gemini-3.6-flash
+GEMINI_MODEL=gemini-3.5-flash-lite
 ```
 
-`GEMINI_MODEL` is optional. The default is `gemini-3.6-flash`.
+`GEMINI_MODEL` is optional. `gemini-3.5-flash-lite` is the default low-latency model.
 
-## Voice mode
+## Voice
 
-Send:
 - `mujhe voice me reply do`
 - `voice me reply karo`
 - `awaaz me jawab do`
-
-The bot will switch to voice replies for that user. To switch back:
 - `text me reply do`
-- `likhkar reply do`
+
+## Song requests
+
+Examples:
+- `mujhe Arijit Singh ka song sunao`
+- `Kesariya bajao`
+- `play Believer`
+
+The bot searches YouTube and sends the result link. It does **not** rip or download copyrighted music. For audio playback, use audio files/URLs you have permission to distribute.
 
 ## VPS
 
@@ -38,4 +43,4 @@ python3 main.py
 
 ## Railway
 
-Deploy the repository with the included Dockerfile. Add `BOT_TOKEN`, `MONGO_URL`, `GEMINI_API_KEY`, and optionally `GEMINI_MODEL` in Railway Variables.
+Deploy with the included Dockerfile and set the variables above.
