@@ -8,10 +8,10 @@ Telegram AI chatbot using Google's Gemini API, MongoDB conversation memory, and 
 BOT_TOKEN=your_telegram_bot_token
 MONGO_URL=your_mongodb_connection_url
 GEMINI_API_KEY=your_google_gemini_api_key
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-3.6-flash
 ```
 
-`GEMINI_MODEL` is optional. The default is `gemini-2.5-flash`.
+`GEMINI_MODEL` is optional. The default is `gemini-3.6-flash`.
 
 ## Voice mode
 
@@ -38,4 +38,4 @@ python3 main.py
 
 ## Railway
 
-Deploy the repository with the included Dockerfile. Add the four environment variables above in Railway Variables.
+Deploy the repository with the included Dockerfile. Add `BOT_TOKEN`, `MONGO_URL`, `GEMINI_API_KEY`, and optionally `GEMINI_MODEL` in Railway Variables.
