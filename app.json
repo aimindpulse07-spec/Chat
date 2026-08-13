@@ -1,0 +1,24 @@
+{
+  "name": "Telegram Gemini AI Bot",
+  "description": "Telegram AI chatbot with Gemini and optional voice replies.",
+  "repository": "https://github.com/ITZ-ZAID/AI",
+  "env": {
+    "GEMINI_API_KEY": {
+      "description": "Google Gemini API key from Google AI Studio",
+      "required": true
+    },
+    "GEMINI_MODEL": {
+      "description": "Gemini model name. Default: gemini-3.5-flash",
+      "value": "gemini-3.5-flash",
+      "required": false
+    },
+    "BOT_TOKEN": {
+      "description": "Telegram bot token from @BotFather",
+      "required": true
+    },
+    "MONGO_URL": {
+      "description": "MongoDB connection URL",
+      "required": true
+    }
+  }
+}
