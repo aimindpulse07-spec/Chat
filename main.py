@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import re
+import os
+import json
 from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Optional
@@ -20,27 +22,23 @@ mongo_client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000, connect=Fal
 db = mongo_client["Word"]
 history_collection = db["ChatHistory"]
 BOT_ID: Optional[int] = None
+GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2", "").strip()
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse"
 # Keep one warm HTTP/2 connection instead of creating a new TLS connection for every message.
 HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 SYSTEM_PROMPT = (
-    "You are a warm, emotionally intelligent human-like chat companion in Telegram. "
-    "Your goal is to make the user feel heard, understood, and comfortable, not impressed by an AI. "
-    "Match the user's language, slang, spelling, message length, and energy: Hindi, Hinglish, or English. "
-    "For casual chat, answer naturally in 1-2 short sentences. Do not over-explain unless asked. "
-    "Before answering emotional messages, infer the user's likely feeling from their words and context "
-    "(for example: happy, excited, sad, lonely, angry, stressed, confused, embarrassed, playful). "
-    "Respond to the feeling first when appropriate: validate it briefly, then say something genuinely useful or comforting. "
-    "Never sound like a therapist, customer-support agent, motivational poster, or formal assistant. "
-    "Avoid robotic openings such as 'Bilkul', 'Sure', 'Of course', 'Certainly', 'As an AI', or 'I understand'. "
-    "Do not mention AI, Gemini, prompts, APIs, policies, models, or that you are a bot unless directly asked. "
-    "Do not repeat the user's message or summarize it unnecessarily. "
-    "Use natural contractions, casual punctuation, and occasional emojis only when they fit the user's tone. "
-    "If the user is joking, joke back. If they are angry, stay calm and human. If they are sad, be warm without becoming dramatic. "
-    "If the user is excited, share the excitement. If they ask a simple question, answer directly. "
-    "Do not claim real-world experiences, a body, a location, or memories that you do not actually have. "
-    "Never force a question at the end of every reply. Keep the conversation flowing naturally."
+    "You are a natural Telegram chat companion. Never sound like a customer-service bot or an AI. "
+    "Match the user's language (Hindi/Hinglish/English), slang, spelling and energy. "
+    "For normal chat, reply in 1 short sentence or 1-2 short lines; answer directly. "
+    "Read emotional tone first: notice sadness, anger, loneliness, stress, excitement, embarrassment, teasing or happiness. "
+    "Respond to the feeling naturally without therapy-speak, lectures, or dramatic language. "
+    "If upset, be warm and present; if happy, share the energy; if joking, joke back. "
+    "Avoid robotic openings like 'Bilkul', 'Sure', 'Of course', 'Certainly', 'As an AI', or 'I understand'. "
+    "Do not mention AI, Gemini, prompts, APIs, policies or models unless directly asked. "
+    "Do not repeat or summarize the user's message. Do not force a question at the end. "
+    "Use emojis sparingly and only when they fit. Keep answers short unless the user asks for detail. "
+    "Never invent real-world experiences, a body, location, or memories."
 )
 
 VOICE_ON_RE = re.compile(r"\b(voice|awaaz|aawaz|audio)\b.*\b(reply|jawab|response|do|karo|karna|dena)\b|\b(mujhe|mujhko)\b.*\b(voice|awaaz|aawaz|audio)\b", re.I)
@@ -163,48 +161,83 @@ async def gemini_stream(chat_id: int, user_id: int, message_text: str):
         for x in history if x.get("role") in ("user", "model") and x.get("text")
     ]
     contents.append({"role": "user", "parts": [{"text": message_text}]})
+
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": contents,
-        "generationConfig": {"maxOutputTokens": 80},
+        "generationConfig": {
+            "maxOutputTokens": 48,
+            "thinkingConfig": {"thinkingLevel": "minimal"},
+        },
     }
-    url = GEMINI_URL.format(model=GEMINI_MODEL)
+
     global HTTP_CLIENT
     if HTTP_CLIENT is None:
         HTTP_CLIENT = httpx.AsyncClient(
-            timeout=httpx.Timeout(6.0, connect=1.0),
+            timeout=httpx.Timeout(5.0, connect=0.8, read=4.0, write=2.0, pool=1.0),
             http2=True,
             limits=httpx.Limits(max_connections=200, max_keepalive_connections=100),
         )
-    full = []
-    async with HTTP_CLIENT.stream(
-        "POST", url,
-        headers={"x-goog-api-key": GEMINI_API_KEY, "accept": "text/event-stream"},
-        json=payload,
-    ) as response:
-        response.raise_for_status()
-        async for line in response.aiter_lines():
-            if not line.startswith("data:"):
+
+    url = GEMINI_URL.format(model=GEMINI_MODEL)
+    keys = [GEMINI_API_KEY] + ([GEMINI_API_KEY_2] if GEMINI_API_KEY_2 else [])
+    last_error = None
+
+    for key in keys:
+        try:
+            full = []
+            async with HTTP_CLIENT.stream(
+                "POST", url,
+                headers={"x-goog-api-key": key, "accept": "text/event-stream"},
+                json=payload,
+            ) as response:
+                if response.status_code in (429, 500, 502, 503, 504):
+                    await response.aread()
+                    raise httpx.HTTPStatusError(
+                        f"Gemini temporary HTTP {response.status_code}",
+                        request=response.request, response=response,
+                    )
+                response.raise_for_status()
+
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if not raw or raw == "[DONE]":
+                        continue
+                    try:
+                        data = json.loads(raw)
+                    except Exception:
+                        continue
+                    for candidate in data.get("candidates", []):
+                        for part in candidate.get("content", {}).get("parts", []):
+                            chunk = part.get("text")
+                            if chunk:
+                                full.append(chunk)
+                                yield chunk, False
+
+            reply = "".join(full).strip()
+            if not reply:
+                raise RuntimeError("Gemini returned an empty reply")
+
+            _cache_history(chat_id, user_id, message_text, reply)
+            asyncio.create_task(asyncio.to_thread(_save_history, chat_id, user_id, message_text, reply))
+            yield "", True
+            return
+
+        except httpx.HTTPStatusError as exc:
+            last_error = exc
+            status = exc.response.status_code if exc.response is not None else 0
+            logger.warning("Gemini HTTP %s", status)
+            if key != keys[-1] and status in (429, 500, 502, 503, 504):
                 continue
-            raw = line[5:].strip()
-            if not raw or raw == "[DONE]":
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            last_error = exc
+            logger.warning("Gemini network/timeout: %s", exc)
+            if key != keys[-1]:
                 continue
-            try:
-                data = __import__("json").loads(raw)
-            except Exception:
-                continue
-            for candidate in data.get("candidates", []):
-                for part in candidate.get("content", {}).get("parts", []):
-                    text = part.get("text")
-                    if text:
-                        full.append(text)
-                        yield text, False
-    reply = "".join(full).strip()
-    if not reply:
-        raise RuntimeError("Gemini returned an empty reply")
-    _cache_history(chat_id, user_id, message_text, reply)
-    asyncio.create_task(asyncio.to_thread(_save_history, chat_id, user_id, message_text, reply))
-    yield "", True
+
+    raise RuntimeError(f"Gemini unavailable: {last_error}")
 
 
 async def gemini_reply(chat_id: int, user_id: int, message_text: str) -> str:
@@ -216,23 +249,63 @@ async def gemini_reply(chat_id: int, user_id: int, message_text: str) -> str:
 
 
 async def send_fast_text_reply(message, chat_id: int, user_id: int, text: str) -> None:
-    """Show a Telegram placeholder immediately, then stream the first answer chunks into it."""
-    sent = await message.reply_text("typing…")
+    import time
+    local = instant_reply(text)
+    if local:
+        await message.reply_text(local)
+        _cache_history(chat_id, user_id, text, local)
+        asyncio.create_task(asyncio.to_thread(_save_history, chat_id, user_id, text, local))
+        return
+
+    try:
+        await message.chat.send_action("typing")
+    except Exception:
+        pass
+
+    sent = None
     full = []
     last_edit = 0.0
-    import time
+
     async for chunk, done in gemini_stream(chat_id, user_id, text):
-        full.append(chunk)
+        if chunk:
+            full.append(chunk)
         current = "".join(full).strip()
+        if not current:
+            continue
         now = time.monotonic()
-        # Telegram edit throttling: edit quickly once useful text arrives, then batch chunks.
-        if current and (done or now - last_edit >= 0.45):
+        if sent is None:
+            sent = await message.reply_text(current[:4096])
+            last_edit = now
+        elif done or now - last_edit >= 0.55:
             try:
                 await sent.edit_text(current[:4096])
                 last_edit = now
             except Exception as exc:
                 if "message is not modified" not in str(exc).lower():
-                    raise
+                    logger.debug("Telegram edit skipped: %s", exc)
+
+    if sent is None:
+        raise RuntimeError("Gemini returned no text")
+    final = "".join(full).strip()
+    if final and final[:4096] != sent.text:
+        try:
+            await sent.edit_text(final[:4096])
+        except Exception:
+            pass
+
+
+def instant_reply(text: str) -> Optional[str]:
+    t = re.sub(r"\s+", " ", text.strip().lower())
+    table = {
+        "hi": "Hey 😄", "hii": "Heyy 😄", "hiii": "Heyy 😄 kya scene hai?",
+        "hello": "Hey 👋 kaise ho?", "hey": "Hey 😄 kya haal?", "heyy": "Heyy 😄",
+        "namaste": "Namaste 😊 kaise ho?", "good morning": "Good morning ☀️",
+        "good night": "Good night 😴", "thanks": "Arey, koi baat nahi 😄",
+        "thank you": "Anytime 😄", "thx": "Anytime 😄", "ok": "Haan 😄",
+        "okay": "Haan 😄", "hmm": "Hmm 😅", "haan": "Haan, bolo 😄",
+        "yes": "Haan 😄", "no": "Theek hai 😄",
+    }
+    return table.get(t)
 
 
 async def search_song(query: str) -> Optional[tuple[str, str]]:
